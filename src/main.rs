@@ -2,28 +2,38 @@ use clap::Parser;
 use sha2::digest::generic_array::GenericArray;
 use sha2::digest::typenum::U32;
 use sha2::{Digest, Sha256};
-use std::sync::mpsc::SendError;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+
+/// A cli tool to find **-F** number of hashes with **-N** zeroes on the end.
+/// 
+/// It's starts from number 1 and for every number it will generate sha256 hash. 
+/// If generated hash ends with -N zeroes, the hash and number will be printed in console.
+/// It won't stop until -F hashes are found.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about)]
 struct Cli {
-    /// Number of zeroes at the end of SHA256 hash
+    /// Number of zeroes at the end of hash
     #[arg(short = 'N')]
     num_zeroes: u32,
 
-    /// Number of hashes to output
+    /// Number of hashes to print
     #[arg(short = 'F')]
     num_hash: usize,
 
-    /// Number of threads
-    #[arg(short = 'T', default_value_t = 0)]
+    /// Number of workers that will be working concurrently.
+    /// If num_threads is not specified, it will be set to thread::available_paralellism() instead.
+    #[arg(short = 'T', long = "threads", default_value_t = 0)]
     num_threads: usize,
+
+    /// Number of hashes that one worker will process on call 
+    #[arg(short = 'S', long = "step", default_value_t = 10)]
+    step: usize
 }
 
-type Job = Box<dyn FnOnce() + Send + Sync + 'static>;
+type Job = Box<dyn FnOnce() + Send + 'static>;
 type JobReceiver = Arc<Mutex<mpsc::Receiver<Job>>>;
 type Handle = thread::JoinHandle<()>;
 
@@ -48,11 +58,10 @@ impl WorkerPool {
         }
     }
 
-    fn execute<J: FnOnce() + Send + Sync + 'static>(&self, f: J) -> Result<(), SendError<Job>> {
+    fn execute<J: FnOnce() + Send + 'static>(&self, f: J) {
         let job = Box::new(f);
-        self.sender.as_ref().unwrap().send(job)
+        let _ = self.sender.as_ref().unwrap().send(job);
     }
-
 }
 
 impl Drop for WorkerPool {
@@ -83,7 +92,10 @@ impl Worker {
             job();
         });
 
-        Worker { id, handle: Some(handle) }
+        Worker {
+            id,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -100,45 +112,50 @@ fn main() {
         cli.num_threads = thread::available_parallelism().unwrap().get() as usize;
     }
 
-    let mut hashes = Vec::<HashPair>::new();
+    let hashes = generate_hash_with_zeroes(cli.num_threads, cli.num_hash, cli.num_zeroes, cli.step);
 
-    let pool = WorkerPool::new(cli.num_threads);
-    let (tx, rx) = mpsc::channel::<HashPair>();
+    hashes.iter().for_each(|h| println!("{}, {}", h.n, h.hash));
+}
+
+fn generate_hash_with_zeroes(num_threads: usize, hash_limit: usize, num_zeroes: u32, step: usize) -> Vec<HashPair> {
+    let mut hashes = Vec::<HashPair>::new();
     let mut counter = 1;
+
+    let pool = WorkerPool::new(num_threads);
+    let (tx, rx) = mpsc::channel::<HashPair>();
     let now = Instant::now();
 
-    while hashes.len() < cli.num_hash {
+    while hashes.len() < hash_limit {
         let sender = tx.clone();
         pool.execute(move || {
-            let hash = format!("{:x}", generate_hash(counter.to_string()));
+            for i in counter..counter + step {
+                let hash = format!("{:x}", generate_sha256(i.to_string()));
 
-            if count_slice_end(hash.as_ref(), &('0' as u8)) == cli.num_zeroes {
-                sender.send(HashPair {
-                    n: counter,
-                    hash: hash,
-                }).unwrap();
+                if count_slice_end(hash.as_ref(), &('0' as u8)) == num_zeroes {
+                    let _ = sender
+                        .send(HashPair {
+                            n: i,
+                            hash: hash,
+                        });
+                }
             }
-        }).unwrap();
+        });
 
-        counter += 1;
+        counter += step;
 
         if let Ok(data) = rx.try_recv() {
             hashes.push(data);
         }
     }
-
     let end = now.elapsed();
-    println!("{:?}", end);
-
-    drop(rx);
+    println!("step: {} elapsed: {:?}", step, end);
 
     hashes.sort();
 
-    hashes.iter().for_each(|h| println!("{}, {}", h.n, h.hash));
-
+    hashes
 }
 
-fn generate_hash(data: impl AsRef<[u8]>) -> GenericArray<u8, U32> {
+fn generate_sha256(data: impl AsRef<[u8]>) -> GenericArray<u8, U32> {
     let mut hasher = Sha256::default();
     hasher.update(data);
     hasher.finalize()
@@ -157,3 +174,10 @@ fn count_slice_end<T: Eq + Sized>(data: &[T], e: &T) -> u32 {
 
     counter
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+
+//     fn bench_different_steps(b: &mut Bencher)
+// }
