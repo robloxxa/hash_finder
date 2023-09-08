@@ -40,7 +40,7 @@ Options:
 ## Build
 ```shell
 # Clone this repo
-git clone link
+git clone https://github.com/robloxxa/hash_finder.git
 # Change directory to cloned folder
 cd hash_finder
 # Build tool via cargo with -r (release) tag
